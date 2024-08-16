@@ -1,0 +1,240 @@
+
+#include <barry-state-machine_inferencing.h> //library with the trained model for goal detection (trained on the orange square goal in the MARC)
+#include <eloquent_esp32cam.h>
+#include <eloquent_esp32cam/edgeimpulse/fomo.h>
+#include "motor.hpp"
+
+using eloq::camera;
+using eloq::ei::fomo;
+
+//barometer setup    
+#include <Wire.h>
+#include <SPI.h>
+#include <Adafruit_Sensor.h>
+#include "Adafruit_BMP3XX.h"
+
+#define BMP_SCK 32 //I2C //scl
+#define BMP_MISO 13 //I2C //sdo
+#define BMP_MOSI 14 //I2C //sda
+#define BMP_CS 33 //I2C
+
+#define SEALEVELPRESSURE_HPA (1013.25)
+
+Adafruit_BMP3XX bmp;
+
+
+//initialize variables
+float h_des = 1.5;//desired height in meters
+
+float Kp = 150;//coefficient for speed control
+float Kd = 150;//coefficient for derivative 200
+float e = 0;//desired - measured
+float u = 0;//upward thrust
+float ground = 0;//altitude of ground above sea level
+float time_curr;
+float time_prev;
+float e_curr;
+float e_prev;
+int i = 0;//count var
+float unfilt;
+int turnVal = -20;
+int stableCount = 0;
+
+// Configurations for the motors:
+Motor forward_motor = {
+    .pin = 15,
+    .ch = 15,
+    .gain = 0.8,
+    .isReversed = true
+    // .isReversed = true
+};
+
+Motor tail_motor = {
+    .pin = 12,
+    .ch = 12,
+    .gain = 0.8,
+    .isReversed = true
+    // .isReversed = true
+};
+
+Motor vert_motor = {
+    .pin = 3, 
+    .ch = 3,
+    .gain = 0.8,
+    //.isReversed =  false
+     .isReversed = true
+};
+unsigned long myTime;
+
+int goalSeen=0;
+int goalX = 0;
+void setup() {
+  myTime = millis();
+    delay(3000);
+    Serial.begin(115200);
+
+  //barometer setup
+  while (!Serial);
+  Serial.println("Adafruit BMP390 test");
+
+   //if (!bmp.begin_I2C()) {   // hardware I2C mode, can pass in address & alt Wire
+  //if (! bmp.begin_SPI(BMP_CS)) {  // hardware SPI mode  
+  if (! bmp.begin_SPI(BMP_CS, BMP_SCK, BMP_MISO, BMP_MOSI)) {  // software SPI mode
+    Serial.println("Could not find a valid BMP3 sensor, check wiring!"); 
+    while (1);
+  }
+  // Set up oversampling and filter initialization
+  bmp.setTemperatureOversampling(BMP3_OVERSAMPLING_8X);
+  bmp.setPressureOversampling(BMP3_OVERSAMPLING_4X);
+  bmp.setIIRFilterCoeff(BMP3_IIR_FILTER_COEFF_3);
+  bmp.setOutputDataRate(BMP3_ODR_50_HZ);
+
+  //CAMERA SETUP
+    camera.pinout.wrover();
+    camera.brownout.disable();
+    camera.resolution.yolo();
+    camera.pixformat.rgb565();
+  //PROPS SETUP
+  forward_motor.setup();
+  vert_motor.setup();
+  tail_motor.setup();
+
+  delay(100);
+    // init camera
+    while (!camera.begin().isOk())
+        Serial.println(camera.exception.toString());
+        //Serial.println("CAMERA NOT OK!!!");
+    //If there are no exceptions, camera is ready to detect the goal
+
+      ground = bmp.readAltitude(SEALEVELPRESSURE_HPA);
+    Serial.print("ground = ");
+    Serial.println(ground);
+    delay(1000);
+    ground = bmp.readAltitude(SEALEVELPRESSURE_HPA);
+    Serial.print("ground = ");
+    Serial.println(ground);
+}
+
+
+void loop() {
+  
+  
+   // sensors_event_t temp_event, pressure_event;
+
+    if (!bmp.performReading()) {
+      vert_motor.move(updateVert());
+    Serial.println("Failed to perform reading :(");
+    return;
+  }
+
+//forward_motor.move(-5);
+vert_motor.move(updateVert());
+
+  
+//CAMERA CHECKS 
+    // capture pictures
+    if (!camera.capture().isOk()) {
+      vert_motor.move(updateVert());
+        Serial.println(camera.exception.toString());
+        
+        return;
+    }
+    // run FOMO (faster objects more objects)
+    vert_motor.move(updateVert());
+    if (!fomo.run().isOk()) {
+      vert_motor.move(updateVert());
+      Serial.println(fomo.exception.toString());
+      return;
+    }
+
+//OBJECT DETECTION
+vert_motor.move(updateVert());
+    /*Serial.printf(
+      "Found %d object(s) in %dms\n", 
+      fomo.count(),
+      fomo.benchmark.millis()
+    );*/
+vert_motor.move(updateVert());
+boolean obj = fomo.foundAnyObject();
+vert_motor.move(updateVert());
+//STATE MACHINE
+if(!obj){ //object is not seen
+vert_motor.move(updateVert());
+tail_motor.move(turnVal);
+}
+
+else{ //obj is seen
+//could change it to only reverse turning when prob>.95
+vert_motor.move(updateVert());
+float prob = fomo.first.proba;
+vert_motor.move(updateVert());
+if(prob>0.99){
+tail_motor.move(-turnVal);
+turnVal=-turnVal;
+vert_motor.move(updateVert());
+   /*Serial.printf(
+      "Looking at the goal. %s at (x = %d, y = %d) (size %d x %d). "
+      "Proba is %.2f\n", 
+      fomo.first.label, //label of object seen, in this case its the goal (labelled "goal") because there are no other objects its trained to see
+      fomo.first.x, //x coord of boundifng box
+      fomo.first.y, //y coord of bounding box
+      fomo.first.width, //width of bounding box
+      fomo.first.height, //height of bounding box
+      fomo.first.proba //probability that the object is the goal, 1 is the highest
+    );*/
+    vert_motor.move(updateVert());
+    stableCount++;
+    if(stableCount==5){
+    vert_motor.move(updateVert());
+     forward_motor.move(120);
+     delay(5000);
+     stableCount=0; //if you remove this and the previous delay, it should keep going forward constantly once it stabilizes 
+    }
+}
+}
+
+vert_motor.move(updateVert());
+
+}//end loop
+
+float updateVert(){
+    float unfilt = (bmp.readAltitude(SEALEVELPRESSURE_HPA));
+    time_curr = millis();
+    //get error
+    e = (h_des - (unfilt - ground));//unfiltered    
+
+    //calculate derivative
+    e_curr = e;
+    float e_dot = ((e_curr - e_prev) / (time_curr - time_prev));
+
+    //calculate upward thrust
+    u = (Kp * e) + (Kd * e_dot);
+
+    //set limits on upward thrust
+    if (u >= 64){
+      u = 64;
+    }
+    if (u<= -64){
+      u = -64;
+    }  
+/*vert_motor.move(-u);
+Serial.println("u: ");
+Serial.print(-u);*/
+//vert motor test 
+ /*vert_motor.move(80); 
+  delay(6000);
+  vert_motor.move(0);
+  delay(2000);
+  vert_motor.move(-80);
+  delay(6000);*/
+//delay(50);
+
+  e_prev = e_curr;
+    time_prev = time_curr;
+
+return u;
+}
+
+
+
+ 
